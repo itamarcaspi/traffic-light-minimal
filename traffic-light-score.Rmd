@@ -1,0 +1,564 @@
+---
+title: 'Red Light Covid-19 Score Generator'
+author: "Itamar Caspi"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: show
+    highlight: haddock
+    keep_md: no
+    theme: journal
+    toc: yes
+    toc_depth: 4
+    toc_float: yes
+abstract: |
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(eval = TRUE,
+                      echo = TRUE,
+                      warning = FALSE,
+                      message = FALSE)
+```
+
+## Load Packages
+```{r}
+library(tidyverse)
+library(lubridate)
+library(ggridges)
+library(RcppRoll)
+library(here)
+```
+
+## The model
+
+The COVID-19 score for each city is defined as follows:
+
+$$score_t = infected_t\times growth_t \times f(pos_t)$$
+where 
+* $pos_t$ denotes the rate of positive cases in the last 7 days.
+* $infected_t$ is the number of new cases in the last 7 days.
+* $growth_t$ is the new cases gross growth rate, current vs. previous week. 
+
+The function $f(pos_t)$ is defend as follows:
+
+| $pos_t$       | >5% | 5%-10% |  >10% |
+|---------------|-----|--------|-------|
+| $f(pos_t)$    | 1   | 2      |  4    |
+
+
+## Read data
+```{r}
+df_raw <- read_csv(here("data","data_new.csv"), na = "NULL")
+
+head(df_raw)
+```
+
+## Set parameters
+```{r}
+min_pop      <- 0
+growth_lag   <- 7
+weeks_ahead  <- 2
+offset       <- 2
+roll_ma      <- 7
+round_score  <- 1
+score_mult   <- 1
+score_ciel   <- 10
+
+factor_positive <- function(x){
+  x = case_when(
+      x <= 5              ~ 1,
+      x >  5  & x <= 10   ~ 2,
+      x >  10 & x <= 15   ~ 4,
+      x >  15 & x <= 20   ~ 8,
+      x >  20 & x <= 25   ~ 16,
+      x >  25             ~ 32   
+  )
+  return(x)
+}
+
+score_trunc <- function(x){
+  x = case_when(
+      x <  0                   ~ 0,
+      x >= 0 & x <= score_ciel ~ x,
+      x >  score_ciel          ~ score_ciel,
+    )
+  return(x)
+}
+```
+
+## Names (255)
+```{r}
+city_255 <- c("אום אל-פחם", "אופקים", "אור יהודה", "אור עקיבא", "אילת", "אלעד", "אריאל", "אשדוד", "אשקלון", "באקה אל-גרביה", "באר שבע", "בית שאן", "בית שמש", "ביתר עילית", "בני ברק", "בת ים", "גבעת שמואל", "גבעתיים", "דימונה", "הוד השרון", "הרצליה", "חדרה", "חולון", "חיפה", "טבריה", "טייבה", "טירה", "טירת כרמל", "טמרה", "יבנה", "יהוד", "יקנעם עילית", "ירושלים", "כפר יונה", "כפר סבא", "כפר קאסם", "כרמיאל", "לוד", "מגדל העמק", "מודיעין עילית", "מודיעין-מכבים-רעות", "מעלה אדומים", "מעלות-תרשיחא", "נהריה", "נס ציונה", "נצרת", "נשר", "נתיבות", "נתניה", "סח'נין", "עכו", "עפולה", "עראבה", "ערד", "פתח תקווה", "צפת", "קלנסווה", "קרית אונו", "קרית אתא", "קרית ביאליק", "קרית גת", "קרית ים", "קרית מוצקין", "קרית מלאכי", "קרית שמונה", "ראש העין", "ראשון לציון", "רהט", "רחובות", "רמלה", "רמת גן", "רמת השרון", "רעננה", "שדרות", "שפרעם", "תל אביב - יפו", "אבו גוש", "אבו סנאן", "אבן יהודה", "אורנית", "אזור", "אכסאל", "אליכין", "אלפי מנשה", "אלקנה", "אעבלין", "אפרת", "באר יעקב", "בועיינה-נוג'ידאת", "בוקעאתא", "ביר אל-מכסור", "בית אל", "בית אריה", "בית ג'ן", "בית דגן", "בני עי\"ש", "בנימינה-גבעת עדה", "בסמ\"ה", "בסמת טבעון", "בענה", "גבעת זאב", "ג'דיידה-מכר", "גדרה", "ג'ולס", "ג'לג'וליה", "גן יבנה", "גני תקווה", "ג'סר א-זרקא", "ג'ש (גוש חלב)", "ג'ת", "דאלית אל-כרמל", "דבוריה", "דייר אל-אסד", "דייר חנא", "הר אדר", "זכרון יעקב", "זמר", "זרזיר", "חורה", "חורפיש", "חצור הגלילית", "חריש", "טובא-זנגריה", "טורעאן", "יאנוח-ג'ת", "יבנאל", "יסוד המעלה", "יפיע", "ירוחם", "ירכא", "כאבול", "כאוכב אבו אל-היג'א", "כוכב יאיר", "כסיפה", "כסרא-סמיע", "כעביה-טבאש-חג'אג'רה", "כפר ברא", "כפר ורדים", "כפר יאסיף", "כפר כמא", "כפר כנא", "כפר מנדא", "כפר קרע", "כפר שמריהו", "כפר תבור", "להבים", "לקיה", "מבשרת ציון", "מגאר", "מג'ד אל-כרום", "מגדל", "מג'דל שמס", "מזכרת בתיה", "מזרעה", "מטולה", "מיתר", "מסעדה", "מעיליא", "מעלה אפרים", "מעלה עירון", "מצפה רמון", "משהד", "נחף", "סאג'ור", "סביון", "ע'ג'ר", "עומר", "עיילבון", "עילוט", "עין מאהל", "עין קנייא", "עמנואל", "עספיא", "ערערה", "ערערה-בנגב", "פוריידיס", "פסוטה", "פקיעין (בוקייעה)", "פרדס חנה-כרכור", "פרדסיה", "קדומים", "קדימה-צורן", "קצרין", "קרית ארבע", "קרית טבעון", "קרית יערים", "קרית עקרון", "קרני שומרון", "ראמה", "ראש פינה", "ריינה", "רכסים", "רמת ישי", "שבלי - אום אל-גנם", "שגב-שלום", "שוהם", "שלומי", "שעב", "תל מונד", "תל שבע", "אל קסום", "אל-בטוף", "אלונה", "אשכול", "באר טוביה", "בוסתן אל-מרג", "בני שמעון", "ברנר", "גדרות", "גולן", "גוש עציון", "גזר", "גן רווה", "דרום השרון", "הגלבוע", "הגליל העליון", "הגליל התחתון", "הערבה התיכונה", "הר חברון", "זבולון", "חבל אילות", "חבל יבנה", "חבל מודיעין", "חוף אשקלון", "חוף הכרמל", "חוף השרון", "יואב", "לב השרון", "לכיש", "מבואות החרמון", "מגידו", "מגילות ים המלח", "מטה אשר", "מטה בנימין", "מטה יהודה", "מנשה", "מעלה יוסף", "מרום הגליל", "מרחבים", "משגב", "נווה מדבר", "נחל שורק", "עמק הירדן", "עמק המעיינות", "עמק חפר", "עמק יזרעאל", "שדות דן", "ערבות הירדן", "רמת נגב", "שדות נגב", "שומרון", "שער הנגב", "שפיר", "תמר", "נוף הגליל")
+```
+
+# Filtering
+
+```{r}
+df <- 
+  df_raw %>% 
+  # rename variables
+  rename(
+    pos      = positive_percentage_last_7_days,
+    # infected = positive_tests_for_virus_diagnosis_for_10k_last_7_days,
+    infected = new_sick_for_10k_last_7_days,
+    tests    = count_test_for_virus_diagnosis_for_10k_last_7_days,
+    growth_d = growth_rate_percentage_last_7_days,
+    pop      = citypopulation,
+    city     = city_desc_new,
+    date     = day_date
+  ) %>%
+  mutate(
+    date = ymd(date),
+    infected_n = infected * pop / 10000
+  ) %>% 
+  filter(
+    pop >= min_pop,
+    city %in% city_255
+  ) %>%
+  arrange(city, date) %>% 
+  select(city, date, pos, infected, tests, infected_n, pop)
+```
+
+## Processing
+```{r}
+df_proc <- 
+  df %>% 
+  mutate(
+    f_pos = factor_positive(pos)
+  ) %>% 
+  # generate weekly growth rate
+  group_by(city) %>%
+  mutate(
+    growth_w = (infected / lag(infected, growth_lag)),
+    growth_w = replace(growth_w, growth_w %in% c(Inf, -Inf, NaN), NA)
+  ) %>%
+  ungroup() %>% 
+  #generate log score
+  mutate(
+    score            = infected * (growth_w)^weeks_ahead * f_pos,
+    log_score        = log(score),
+    log_score        = replace(log_score, log_score %in% c(Inf, -Inf, NaN), NA),
+    log_score_offset = log_score + offset,
+    log_score_round  = round(log_score_offset, round_score),
+    log_score_trunc  = score_trunc(log_score_round)
+  ) %>% 
+  select(
+    date, city, pop, pos, f_pos, tests, growth_w, infected, infected_n, score, starts_with("log_score")
+  )
+
+head(df)
+```
+
+## Distribution
+
+min-max
+```{r}
+df_proc %>% 
+  filter(
+    date == ymd("2020-08-19"),
+    infected > 10
+  ) %>% 
+  summarise(
+    min = min(log_score_round, na.rm = TRUE),
+    max = max(log_score_round, na.rm = TRUE)
+  )
+```
+
+Recent score distribution
+```{r}
+p_dist <- 
+  df_proc %>% 
+  filter(date == ymd("2020-08-19")) %>% 
+  ggplot(aes(log_score_round)) +
+  geom_histogram(binwidth = 1, fill = "#3E4A89") +
+  labs(
+    y = "count",
+    x = "positive rate"
+  )
+
+p_dist
+```
+
+The distribution of the score over time
+```{r}
+dates <- seq(ymd("2020-04-01"), ymd("2020-08-19"), by = "2 weeks")
+
+df_ridge <- df_proc %>% 
+  filter(
+    date %in% dates,
+    infected > 10
+  ) %>% 
+  mutate(date = factor(date)) 
+
+
+p_ridge_quant <- 
+  df_ridge %>% 
+  ggplot(aes(log_score_offset, date, fill = factor(stat(quantile)))) +
+  stat_density_ridges(
+    geom = "density_ridges_gradient",
+    calc_ecdf = TRUE,
+    quantiles = c(0.5, 0.975),
+    quantile_lines = TRUE
+  ) +
+  scale_fill_viridis_d(name = "Percentiles", labels = c("(0,0.5]", "(0.5,0.975]","(0.975,1]")) +
+  labs(
+    y = "",
+    x = "Score"
+  ) + 
+  theme_light(20)
+
+p_ridge_quant
+```
+
+## Impute missing values
+```{r}
+df_fill <- 
+  df_proc %>% 
+  group_by(city) %>% 
+  fill(log_score_trunc) %>% 
+  mutate(
+    log_score_trunc = replace(
+      log_score_trunc,
+      log_score_trunc %in% c(NA),
+      0
+    )
+  )
+
+head(df_fill)
+```
+
+Recent score distribution
+```{r}
+p_dist <- df_fill %>% 
+  filter(date == ymd("2020-08-09")) %>% 
+  ggplot(aes(log_score_trunc)) +
+  geom_histogram(binwidth = 0.2, fill = "#3E4A89") +
+  labs(
+    y = "count",
+    x = "positive rate"
+  )
+
+p_dist
+```
+
+The distribution of the score over time
+```{r}
+dates <- seq(ymd("2020-04-01"), ymd("2020-08-09"), by = "2 weeks")
+
+df_ridge <- 
+  df_fill %>% 
+  filter(date %in% dates) %>% 
+  mutate(date = factor(date)) 
+
+
+p_ridge_quant <- 
+  df_ridge %>% 
+  ggplot(aes(log_score_trunc, date, fill = factor(stat(quantile)))) +
+  stat_density_ridges(
+    geom = "density_ridges_gradient",
+    calc_ecdf = TRUE,
+    quantiles = c(0.5, 0.975),
+    quantile_lines = TRUE
+  ) +
+  scale_fill_viridis_d(name = "Percentiles", labels = c("(0,0.5]", "(0.5,0.975]","(0.975,1]")) +
+  labs(
+    y = "",
+    x = "Score"
+  )
+
+p_ridge_quant
+```
+
+## Moving average
+```{r}
+df_ma <- 
+  df_fill %>% 
+  mutate(
+    log_score_trunc_ma = roll_mean(
+      log_score_trunc,
+      roll_ma,
+      fill = NA,
+      align = "right"
+    ),
+    log_score_trunc_ma_round = round(log_score_trunc_ma, round_score),
+    log_score_trunc_ma_floor = floor(log_score_trunc_ma)
+  ) %>% 
+  ungroup() %>% 
+  select(date, city, starts_with("log_score"))
+
+head(df_ma)
+```
+
+## Generate output
+```{r output}
+df_final <- 
+  df_ma %>% 
+  filter(date >= ymd("2020-03-01")) %>% 
+  rename(
+    score = log_score_trunc_ma_round,
+    score_floor = log_score_trunc_ma_floor
+  ) %>%
+  select(city, date, score, score_floor) 
+  
+head(df_final)
+```
+
+## Write to file
+```{r csv}
+df_final %>% 
+  select(-score) %>% 
+  pivot_wider(names_from = "city", values_from = "score_floor") %>% 
+  write_excel_csv(path = here("output", "red-light_score_19082020.csv"))
+```
+
+
+## Red light classification
+```{r}
+df_final %>% 
+  filter(date == ymd("2020-08-19")) %>% 
+  select(score) %>% 
+  pull() %>% 
+  quantile(., probs=c(0.5, 0.75, 0.90), na.rm=TRUE)
+
+df_color <- 
+  df_final %>% 
+  mutate(
+    label = cut(
+      score,
+      breaks = c(-1, 4, 6, 8, 11),
+      labels = c("green", "yellow", "orange", "red"))
+  )
+```
+
+## Daily report
+```{r}
+day_date <- ymd("2020-08-12")
+
+df_day <- df_proc %>% 
+  filter(date == day_date) %>% 
+  select(city, date, pop, pos, f_pos, growth_w, infected, infected_n, tests) %>% 
+  left_join(
+    df_color %>%
+      filter(date == day_date) %>% 
+      select(city, date, score, score_floor)
+    ) %>% 
+  arrange(desc(score))
+
+file_name <- glue::glue("red-light-data_{day_date}.csv")
+
+df_day %>% 
+  write_excel_csv(path = here("output", file_name))
+```
+
+
+```{r}
+df_color %>% 
+  filter(date == ymd("2020-08-19")) %>% 
+  group_by(score_floor) %>% 
+  summarise(count = n(), label = first(label)) %>% 
+  ungroup() %>% 
+  ggplot(aes(factor(score_floor), count, fill = label)) +
+  geom_col(show.legend = FALSE) +
+  scale_fill_manual(
+    values = c("green", "yellow", "orange", "red"),
+    labels = c("", "", "", "")
+    ) +
+  geom_text(aes(label = count), position = position_dodge(width = 1), vjust = -0.1) +
+  theme_light() +
+  labs(
+    x = "ציון",
+    y = "מספר ערים",
+    fill = "סיווג"
+  )
+```
+
+
+## Red light over time
+```{r}
+dates <- seq(ymd("2020-06-10"), ymd("2020-08-19"), by = "1 week")
+
+p_count <- df_color %>%
+  filter(date %in% dates) %>% 
+  group_by(date) %>% 
+  count(label) %>% 
+  ggplot(aes(date, n, fill = label)) + 
+  geom_col(position = "dodge", show.legend = FALSE) +
+  geom_text(aes(label = n), position = position_dodge(width = 10), vjust = -0.2) +
+  scale_fill_manual(values=c("green", "yellow", "orange", "red")) +
+  labs(
+    x = "",
+    y = "מספר ערים"
+  ) +
+  theme_light()
+
+p_count
+
+p_count_last <- df_color %>%
+  filter(date == ymd("2020-08-15")) %>% 
+  group_by(date) %>% 
+  count(label) %>% 
+  ggplot(aes(date, n, fill = label)) + 
+  geom_col(position = "dodge", show.legend = FALSE) +
+  geom_text(aes(label = n), position = position_dodge(width = 1), vjust = -0.1) +
+  scale_fill_manual(values=c("green", "yellow", "orange", "red")) +
+  labs(
+    x = "",
+    y = "Number of cities"
+  ) +
+  theme_light()
+
+p_count_last
+```
+
+## Write to file
+```{r csv_2}
+df_color %>% 
+  filter(
+    label %in% c("red","orange"),
+    date == ymd("2020-08-19")
+  ) %>%
+  arrange(desc(label)) %>% View()
+  write_excel_csv(path = here("output", "red_19082020.csv"))
+```
+
+
+## Cities in red
+```{r}
+df_color %>% 
+  left_join(df %>% select(city, date, pop, infected)) %>% 
+  filter(infected > 10) %>% 
+  group_by(date, label) %>% 
+  tally() %>% 
+  ungroup() %>% 
+  filter(date >= ymd("2020-07-01")) %>% 
+  ggplot(aes(date, n, color = label)) +
+  geom_line(size = 1, show.legend = FALSE) +
+  facet_wrap(~label, scales = "free_y") +
+  scale_color_manual(values=c("green", "yellow", "orange", "red")) +
+  theme_light() +
+  labs(
+    x = "",
+    y = "מספר ערים בכל רמת סיווג"
+  )
+```
+
+
+
+## Heatmap
+```{r}
+city_sample <- c("ביתר עילית", "קרית מלאכי", "בני ברק", "מודיעין עילית", "רעננה", "כסיפה", "כפר קרע", "ירושלים", "בית שמש", "ערערה בנגב", "תל אביב יפו", "רמת השרון", "רכסים", "ראש העין", "לוד", "רמלה", "אשדוד", "כפר קאסם", "מודיעין מכבים רעות", "רחובות", "פתח תקווה", "אלעד", "בת ים", "ראשון לציון", "חולון", "חיפה", "עפולה", "טבריה", "אום אל פאחם", "כפר סבא", "אילת", "דימונה", "באר שבע", "נהריה", "טייבה", "דיר אל אסד", "נתניה", "יבנאל", "קלנסווה", "קרית גת")
+
+df_final %>% 
+  filter(
+    city %in% city_sample
+  ) %>% 
+  ggplot(aes(x = date, color = score)) +
+  geom_segment(aes(xend = date), size = 2, y = 0, yend = 1) +
+  scale_color_viridis_c(option = "viridis") +
+  facet_grid(rows = vars(city)) +
+  theme_minimal() +
+  guides(
+    color = guide_colourbar(
+      title.vjust = 0.8,
+      barheight = 0.5,
+      barwidth = 10
+    )
+  ) +
+  theme(
+    plot.title.position = "plot",
+    plot.caption.position =  "plot",
+    plot.caption = element_text(hjust = 0),
+    axis.title.x = element_text(hjust = 1),
+    legend.position="bottom",
+    strip.text.y.right = element_text(angle = 0),
+    panel.spacing = unit(0, "lines")
+  ) +
+  labs(
+    x = "",
+    color = "Score",
+    # title = "מפת חום של התפשטות המגפה על פי ישובים",
+    subtitle = ""
+  )
+```
+
+
+## Green cities
+```{r}
+city_green <- c("עילוט")
+
+df_final %>% 
+  filter(
+    city %in% city_green,
+    date >= ymd("2020-04-01")
+  ) %>% 
+  ggplot(aes(x = date, y = score)) +
+  geom_line(size = 1) +
+  facet_wrap(~ city) +
+  scale_color_viridis_d() +
+  theme_light()
+```
+
+
+## Total number of positives
+```{r}
+df_pop <- df_raw %>%
+  rename(
+    city     = city_desc_new,
+    date     = day_date,
+    pop      = citypopulation,
+    infected = positive_tests_for_virus_diagnosis_for_10k_last_7_days
+  ) %>%
+  mutate(
+    infected_n = infected * pop/10000,
+    date = ymd(date)
+  ) %>% 
+  filter(date == ymd("2020-08-19")) %>% 
+  select(city, date, infected_n)
+
+df_color %>% 
+  filter(
+    label %in% c("red", "orange", "yellow", "green"),
+    date == ymd("2020-08-19")
+  ) %>%
+  left_join(df_pop) %>% 
+  arrange(desc(score)) %>% 
+  write_excel_csv(path = here("output", "infected-city_19082020.csv"))
+```
+
+```{r}
+df_day <- df_proc %>% 
+  filter(date == ymd("2020-08-19")) %>% 
+  select(city, date, pop, pos, growth_w, infected, tests) %>% 
+  left_join(
+    df_color %>%
+      filter(date == ymd("2020-08-19")) %>% 
+      select(city, date, score, score_raw)
+    ) %>% 
+  arrange(desc(score))
+
+df_day %>% 
+  write_excel_csv(path = here("output", "red-light-data_19082020.csv"))
+
+df_day %>%
+  filter(pos > 0) %>% 
+  ggplot(aes(pos, score)) +
+  geom_point() +
+  geom_smooth()
+```
+
+```{r}
+red_cities <- c("תמר", "מודיעין עילית", "אלעד", "דבוריה", "בוסתן אל-מרג", "זמר", "מעיליא", "ביתר עילית", "מגדל", "רכסים", "בית אל", "ג'דיידה-מכר", "בני ברק", "טייבה", "כפר קאסם", "מעלה עירון", "ירכא", "אכסאל", "גן רווה", "קרית מלאכי", "בית שמש", "כפר מנדא", "עמנואל", "קלנסווה")
+
+
+df_proc %>% 
+  filter(
+    date %in% seq(ymd("2020-08-13"), ymd("2020-08-19"), by = "1 day"),
+    city %in% red_cities
+  ) %>% 
+  select(city, date, pop, pos, f_pos, tests, growth_w, infected, infected_n, score, log_score_trunc) %>% 
+  arrange(city, date) %>% 
+  write_excel_csv(path = here("output", "red-cities-19082020.csv"))
+  
+```
